@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#000000">
+<title>LED Controller</title>
+<style>
+  :root {
+    --bg: #000;
+    --dim: #555;      /* inactive borders */
+    --mid: #8a8a8a;   /* inactive text */
+    --hi:  #fff;      /* active borders/text (thin lines only) */
+    --fill:#1a1a1a;   /* pressed / progress fill */
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--mid);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-weight: 700; overflow: hidden; }
+  body { display: flex; flex-direction: column; height: 100dvh; padding: 10px; gap: 10px; }
+
+  /* ---------- link status ---------- */
+  #status { flex: 0 0 auto; display: flex; align-items: center; justify-content: center; gap: 12px;
+    min-height: 64px; border: 3px solid var(--dim); border-radius: 14px;
+    font-size: 1.5rem; letter-spacing: .08em; color: var(--mid); text-align: center; padding: 0 10px; }
+  #status .dot { width: 18px; height: 18px; border-radius: 50%; border: 3px solid currentColor; flex: 0 0 auto; }
+  #status.ok { border-color: var(--hi); color: var(--hi); }
+  #status.ok .dot { background: currentColor; }
+  #status.lost { background: var(--hi); border-color: var(--hi); color: #000; animation: blink 1s steps(2) infinite; }
+  @keyframes blink { 50% { background: #000; color: var(--hi); } }
+
+  /* ---------- connect ---------- */
+  #connectBtn { flex: 1 1 auto; font: inherit; font-size: 2.2rem; letter-spacing: .08em;
+    background: transparent; color: var(--hi); border: 4px solid var(--hi); border-radius: 18px; }
+  #connectBtn:active { background: var(--fill); }
+  #msg { display:none; text-align:center; font-size:1rem; color: var(--mid); padding: 6px; }
+
+  /* ---------- controls ---------- */
+  #controls { flex: 1 1 auto; display: none; flex-direction: column; gap: 10px; min-height: 0; }
+  body.ready #controls { display: flex; }
+  body.ready #connectBtn { display: none; }
+  body.offline #controls { opacity: .35; pointer-events: none; }
+  body.offline #connectBtn { display: none; }
+
+  button.big { font: inherit; background: transparent; border: 4px solid var(--dim); color: var(--mid);
+    border-radius: 18px; position: relative; overflow: hidden; }
+  button.big:active { background: var(--fill); }
+  button.big.active { border-color: var(--hi); color: var(--hi); }
+
+  /* brightness row */
+  #levelRow { flex: 1 1 0; display: flex; gap: 10px; min-height: 0; }
+  #levelRow button { flex: 0 0 26%; font-size: 4.5rem; line-height: 1; }
+  #levelBox { flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px; border: 3px solid var(--dim); border-radius: 18px; color: var(--hi); }
+  #levelNum { font-size: 4.2rem; line-height: 1; }
+  #levelNum small { font-size: 1.6rem; color: var(--mid); }
+  #bars { display: flex; gap: 8px; align-items: flex-end; height: 44px; }
+  #bars i { width: 20px; border: 3px solid var(--dim); border-radius: 4px; }
+  #bars i.on { background: var(--hi); border-color: var(--hi); }
+  #bars i:nth-child(1){height:20%} #bars i:nth-child(2){height:40%} #bars i:nth-child(3){height:60%}
+  #bars i:nth-child(4){height:80%} #bars i:nth-child(5){height:100%}
+
+  /* mode row (bottom = thumb zone) */
+  #modeRow { flex: 1.4 1 0; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+  #modeRow button { flex: 1 1 0; font-size: 2.6rem; letter-spacing: .1em; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap: 4px; }
+  #modeRow button span { position: relative; z-index: 1; }
+  #modeRow button small { position: relative; z-index: 1; font-size: 1rem; letter-spacing: .12em; color: var(--mid); }
+  #strobeBtn::after { content:""; position:absolute; left:0; top:0; bottom:0; width:0; background:#333; transition: width 0s; }
+  #strobeBtn.holding::after { width:100%; transition: width .7s linear; }
+</style>
+</head>
+<body class="">
+
+<div id="status"><span class="dot"></span><span id="statusTxt">NOT CONNECTED</span></div>
+<div id="msg"></div>
+
+<button id="connectBtn" class="big">CONNECT</button>
+
+<div id="controls">
+  <div id="levelRow">
+    <button class="big" id="minusBtn" aria-label="Darker">&minus;</button>
+    <div id="levelBox">
+      <div id="levelNum">8<small>%</small></div>
+      <div id="bars"><i></i><i></i><i></i><i></i><i></i></div>
+    </div>
+    <button class="big" id="plusBtn" aria-label="Brighter">+</button>
+  </div>
+
+  <div id="modeRow">
+    <button class="big active" id="dimBtn"><span>DIM</span><small>STEADY</small></button>
+    <button class="big" id="strobeBtn"><span>STROBE</span><small>HOLD</small></button>
+  </div>
+</div>
+
+<script>
+/* ===== must match the ESP32 firmware ===== */
+const DEVICE_NAME  = "LED-Controller";
+const SERVICE_UUID = "12345678-1234-1234-1234-123456789abc";
+const MODE_UUID    = "12345678-1234-1234-1234-123456789abd"; // 0 = dim, 1 = strobe
+const DUTY_UUID    = "12345678-1234-1234-1234-123456789abe"; // 1..100 (%)
+
+const LEVELS = [2, 8, 20, 45, 100];     // brightness steps (duty %)
+const HOLD_MS = 700;                    // long-press time for strobe
+
+let device, modeChar, dutyChar;
+let connected = false, retrying = false;
+let mode = 0;                           // always start steady
+let levelIdx = 1;
+try { const s = parseInt(localStorage.getItem("levelIdx")); if (s >= 0 && s < LEVELS.length) levelIdx = s; } catch (e) {}
+
+const $ = id => document.getElementById(id);
+const buzz = p => { try { navigator.vibrate && navigator.vibrate(p); } catch (e) {} };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+/* ---------- UI ---------- */
+function setLink(state, text) {
+  const s = $("status");
+  s.className = state;                  // ok | lost | ""
+  $("statusTxt").textContent = text;
+  document.body.classList.toggle("ready", state === "ok");
+  document.body.classList.toggle("offline", state === "lost" || state === "connecting");
+  if (state === "connecting") { document.body.classList.add("ready"); }
+}
+function render() {
+  const pct = LEVELS[levelIdx];
+  $("levelNum").innerHTML = pct + "<small>%</small>";
+  [...$("bars").children].forEach((b, i) => b.classList.toggle("on", i <= levelIdx));
+  $("dimBtn").classList.toggle("active", mode === 0);
+  $("strobeBtn").classList.toggle("active", mode === 1);
+}
+
+/* ---------- serialized BLE writes (avoids "GATT operation already in progress") ---------- */
+let chain = Promise.resolve();
+function send(char, value) {
+  chain = chain.then(() => char.writeValue(new Uint8Array([value])))
+               .catch(() => { $("statusTxt").textContent = "WRITE FAILED"; });
+  return chain;
+}
+
+/* ---------- actions ---------- */
+function setMode(m) {
+  if (!connected) return;
+  mode = m; render(); buzz(m === 1 ? [40, 60, 40] : 30);
+  send(modeChar, m);
+}
+function setLevel(i) {
+  if (!connected) return;
+  levelIdx = Math.max(0, Math.min(LEVELS.length - 1, i));
+  try { localStorage.setItem("levelIdx", levelIdx); } catch (e) {}
+  render(); buzz(20);
+  send(dutyChar, LEVELS[levelIdx]);
+}
+
+$("dimBtn").addEventListener("click", () => setMode(0));
+$("minusBtn").addEventListener("click", () => setLevel(levelIdx - 1));
+$("plusBtn").addEventListener("click", () => setLevel(levelIdx + 1));
+
+/* strobe = long press, so an accidental tap can't trigger it */
+(function () {
+  const b = $("strobeBtn"); let t = null;
+  const cancel = () => { clearTimeout(t); t = null; b.classList.remove("holding"); };
+  b.addEventListener("pointerdown", e => {
+    e.preventDefault();
+    if (mode === 1 || !connected) return;
+    b.classList.add("holding");
+    t = setTimeout(() => { cancel(); setMode(1); }, HOLD_MS);
+  });
+  ["pointerup", "pointerleave", "pointercancel"].forEach(ev => b.addEventListener(ev, cancel));
+  b.addEventListener("contextmenu", e => e.preventDefault());
+})();
+
+/* ---------- connection ---------- */
+async function link() {
+  setLink("connecting", "CONNECTING…");
+  const server  = await device.gatt.connect();
+  const service = await server.getPrimaryService(SERVICE_UUID);
+  modeChar = await service.getCharacteristic(MODE_UUID);
+  dutyChar = await service.getCharacteristic(DUTY_UUID);
+  connected = true;
+  chain = Promise.resolve();
+  mode = 0;                              // safe default after every (re)connect: steady
+  render();
+  await send(modeChar, 0);
+  await send(dutyChar, LEVELS[levelIdx]);
+  setLink("ok", "CONNECTED");
+}
+async function retry() {
+  if (retrying) return; retrying = true;
+  while (!connected && device) {
+    await sleep(1500);
+    try { await link(); } catch (e) { setLink("lost", "LINK LOST · RETRYING"); }
+  }
+  retrying = false;
+}
+function onDrop() {
+  connected = false;
+  setLink("lost", "LINK LOST · RETRYING");
+  buzz([250, 120, 250, 120, 250]);
+  retry();
+}
+
+$("connectBtn").addEventListener("click", async () => {
+  if (!navigator.bluetooth) {
+    $("msg").style.display = "block";
+    $("msg").textContent = "Web Bluetooth not available. Use Chrome on Android, and open this page over HTTPS.";
+    return;
+  }
+  try {
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ name: DEVICE_NAME }], optionalServices: [SERVICE_UUID]
+    });
+    device.addEventListener("gattserverdisconnected", onDrop);
+    await link();
+  } catch (e) {
+    document.body.classList.remove("ready", "offline");
+    setLink("", e && e.name === "NotFoundError" ? "NOT CONNECTED" : "CONNECT FAILED");
+  }
+});
+
+/* ---------- keep the screen awake ---------- */
+let wake = null;
+async function keepAwake() { try { wake = await navigator.wakeLock.request("screen"); } catch (e) {} }
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") keepAwake(); });
+keepAwake();
+
+render();
+setLink("", "NOT CONNECTED");
+</script>
+</body>
+</html>
