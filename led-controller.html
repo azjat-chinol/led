@@ -50,7 +50,8 @@
   #levelRow { flex: 1 1 0; display: flex; gap: 10px; min-height: 0; }
   #levelRow button { flex: 0 0 26%; font-size: 4.5rem; line-height: 1; }
   #levelBox { flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 14px; border: 3px solid var(--dim); border-radius: 18px; color: var(--hi); }
+    gap: 10px; border: 3px solid var(--dim); border-radius: 18px; color: var(--hi); cursor: pointer; }
+  #levelBox:active { background: var(--fill); }
   #levelNum { font-size: 4.2rem; line-height: 1; }
   #levelNum small { font-size: 1.6rem; color: var(--mid); }
   #bars { display: flex; gap: 8px; align-items: flex-end; height: 44px; }
@@ -58,6 +59,12 @@
   #bars i.on { background: var(--hi); border-color: var(--hi); }
   #bars i:nth-child(1){height:20%} #bars i:nth-child(2){height:40%} #bars i:nth-child(3){height:60%}
   #bars i:nth-child(4){height:80%} #bars i:nth-child(5){height:100%}
+  #muteHint { font-size: .85rem; letter-spacing: .12em; color: var(--mid); }
+
+  /* muted state */
+  #levelBox.muted { border-style: dashed; color: var(--mid); }
+  #levelBox.muted #muteHint { color: var(--hi); }
+  #minusBtn.disabled { opacity: .35; }
 
   /* mode row (bottom = thumb zone) */
   #modeRow { flex: 1.4 1 0; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
@@ -79,9 +86,10 @@
 <div id="controls">
   <div id="levelRow">
     <button class="big" id="minusBtn" aria-label="Darker">&minus;</button>
-    <div id="levelBox">
+    <div id="levelBox" role="button" aria-label="Tap to mute or unmute">
       <div id="levelNum">8<small>%</small></div>
       <div id="bars"><i></i><i></i><i></i><i></i><i></i></div>
+      <div id="muteHint">TAP TO MUTE</div>
     </div>
     <button class="big" id="plusBtn" aria-label="Brighter">+</button>
   </div>
@@ -97,7 +105,7 @@
 const DEVICE_NAME  = "LED-Controller";
 const SERVICE_UUID = "12345678-1234-1234-1234-123456789abc";
 const MODE_UUID    = "12345678-1234-1234-1234-123456789abd"; // 0 = dim, 1 = strobe
-const DUTY_UUID    = "12345678-1234-1234-1234-123456789abe"; // 1..100 (%)
+const DUTY_UUID    = "12345678-1234-1234-1234-123456789abe"; // 0..100 (%), 0 = off (mute)
 
 const LEVELS = [2, 8, 20, 45, 100];     // brightness steps (duty %)
 const HOLD_MS = 700;                    // long-press time for strobe
@@ -106,11 +114,13 @@ let device, modeChar, dutyChar;
 let connected = false, retrying = false;
 let mode = 0;                           // always start steady
 let levelIdx = 1;
+let muted = false;                      // tap the percentage to mute; not saved, so a page reload starts unmuted
 try { const s = parseInt(localStorage.getItem("levelIdx")); if (s >= 0 && s < LEVELS.length) levelIdx = s; } catch (e) {}
 
 const $ = id => document.getElementById(id);
 const buzz = p => { try { navigator.vibrate && navigator.vibrate(p); } catch (e) {} };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const currentDuty = () => muted ? 0 : LEVELS[levelIdx];
 
 /* ---------- UI ---------- */
 function setLink(state, text) {
@@ -122,9 +132,11 @@ function setLink(state, text) {
   if (state === "connecting") { document.body.classList.add("ready"); }
 }
 function render() {
-  const pct = LEVELS[levelIdx];
-  $("levelNum").innerHTML = pct + "<small>%</small>";
-  [...$("bars").children].forEach((b, i) => b.classList.toggle("on", i <= levelIdx));
+  $("levelNum").innerHTML = currentDuty() + "<small>%</small>";
+  [...$("bars").children].forEach((b, i) => b.classList.toggle("on", !muted && i <= levelIdx));
+  $("levelBox").classList.toggle("muted", muted);
+  $("muteHint").textContent = muted ? "MUTED · TAP TO UNMUTE" : "TAP TO MUTE";
+  $("minusBtn").classList.toggle("disabled", muted);
   $("dimBtn").classList.toggle("active", mode === 0);
   $("strobeBtn").classList.toggle("active", mode === 1);
 }
@@ -148,12 +160,18 @@ function setLevel(i) {
   levelIdx = Math.max(0, Math.min(LEVELS.length - 1, i));
   try { localStorage.setItem("levelIdx", levelIdx); } catch (e) {}
   render(); buzz(20);
-  send(dutyChar, LEVELS[levelIdx]);
+  send(dutyChar, currentDuty());
+}
+function setMute(m) {
+  if (!connected) return;
+  muted = m; render(); buzz(m ? [30, 40, 30] : 30);
+  send(dutyChar, currentDuty());        // 0 when muted, otherwise back to the previous level
 }
 
 $("dimBtn").addEventListener("click", () => setMode(0));
-$("minusBtn").addEventListener("click", () => setLevel(levelIdx - 1));
-$("plusBtn").addEventListener("click", () => setLevel(levelIdx + 1));
+$("minusBtn").addEventListener("click", () => { if (!muted) setLevel(levelIdx - 1); });
+$("plusBtn").addEventListener("click", () => { muted ? setMute(false) : setLevel(levelIdx + 1); });
+$("levelBox").addEventListener("click", () => setMute(!muted));
 
 /* strobe = long press, so an accidental tap can't trigger it */
 (function () {
@@ -181,7 +199,7 @@ async function link() {
   mode = 0;                              // safe default after every (re)connect: steady
   render();
   await send(modeChar, 0);
-  await send(dutyChar, LEVELS[levelIdx]);
+  await send(dutyChar, currentDuty());   // keeps the mute state across a reconnect
   setLink("ok", "CONNECTED");
 }
 async function retry() {
